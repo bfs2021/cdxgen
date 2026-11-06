@@ -182,11 +182,28 @@ function splitCsv(value) {
  *
  * @param {string} output rendered output
  * @param {string | undefined} outputPath optional file path
+ * @param {() => void} onWritten callback invoked once the output was fully
+ *   written; stdout writes to a pipe complete asynchronously, so the process
+ *   must not exit before it fires
  * @returns {void}
  */
-function writeOrPrint(output, outputPath) {
+function writeOrPrint(output, outputPath, onWritten) {
   if (!outputPath) {
-    process.stdout.write(output);
+    // A reader such as head may close the pipe early; treat EPIPE as written
+    // so the caller still exits quietly with the audit's own exit code.
+    let settled = false;
+    const settle = () => {
+      if (!settled) {
+        settled = true;
+        onWritten();
+      }
+    };
+    process.stdout.on("error", (error) => {
+      if (error.code === "EPIPE") {
+        settle();
+      }
+    });
+    process.stdout.write(output, settle);
     return;
   }
   const parentDir = dirname(outputPath);
@@ -194,6 +211,7 @@ function writeOrPrint(output, outputPath) {
     safeMkdirSync(parentDir, { recursive: true });
   }
   writeFileSync(outputPath, output);
+  onWritten();
 }
 
 (async () => {
@@ -234,8 +252,9 @@ function writeOrPrint(output, outputPath) {
       minSeverity: args.minSeverity,
       report: args.report,
     });
-    writeOrPrint(finalized.output, reportFile);
-    process.exit(finalized.exitCode);
+    writeOrPrint(finalized.output, reportFile, () =>
+      process.exit(finalized.exitCode),
+    );
   } catch (error) {
     console.error(error.message);
     process.exit(1);
